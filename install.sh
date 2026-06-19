@@ -69,16 +69,51 @@ ask_port() {
 }
 
 install_deps() {
-    log_step "安装依赖 (git, go, curl)..."
+    log_step "安装依赖 (git, curl)..."
     if command -v apt >/dev/null 2>&1; then
-        apt update -qq && apt install -y git curl golang-go
+        apt update -qq && apt install -y git curl
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y git curl golang
+        yum install -y git curl
     elif command -v apk >/dev/null 2>&1; then
-        apk add git curl go
+        apk add git curl
     else
         log_error "未找到包管理器 (apt/yum/apk)"; exit 1
     fi
+}
+
+ensure_go() {
+    local need="1.21"
+    if command -v go >/dev/null 2>&1; then
+        local ver=$(go version | grep -oP 'go\K[0-9]+\.[0-9]+' | head -1)
+        if [ -n "$ver" ] && [ "$(printf '%s\n' "$need" "$ver" | sort -V | head -1)" = "$need" ]; then
+            log_info "Go $ver 满足要求 (>= $need)"
+            return 0
+        fi
+        log_info "Go $ver 版本过低，需要 >= $need，正在升级..."
+    else
+        log_info "未检测到 Go，正在安装..."
+    fi
+
+    local go_ver="1.22.1"
+    local arch=$(uname -m)
+    case $arch in
+        x86_64)  arch="amd64" ;;
+        aarch64) arch="arm64" ;;
+        *) log_error "不支持的架构: $arch"; exit 1 ;;
+    esac
+
+    local url="https://go.dev/dl/go${go_ver}.linux-${arch}.tar.gz"
+    log_step "下载 Go $go_ver ..."
+    curl -fsSL "$url" -o /tmp/go.tar.gz
+    rm -rf /usr/local/go
+    tar -C /usr/local -xzf /tmp/go.tar.gz
+    rm /tmp/go.tar.gz
+
+    # Add to PATH
+    export PATH=/usr/local/go/bin:$PATH
+    grep -q '/usr/local/go/bin' /etc/profile 2>/dev/null || echo 'export PATH=/usr/local/go/bin:$PATH' >> /etc/profile
+
+    log_success "Go $(go version) 安装完成"
 }
 
 install_from_source() {
@@ -86,6 +121,7 @@ install_from_source() {
     log_step "从源码编译安装..."
     ask_port
     install_deps
+    ensure_go
 
     mkdir -p "$INSTALL_DIR"
 
