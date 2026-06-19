@@ -94,7 +94,7 @@ ensure_go() {
         log_info "未检测到 Go，正在安装..."
     fi
 
-    local go_ver="1.22.1"
+    local go_ver="1.23.1"
     local arch=$(uname -m)
     case $arch in
         x86_64)  arch="amd64" ;;
