@@ -133,6 +133,7 @@ install_from_source() {
 
     log_step "编译中 (约 1-3 分钟)..."
     cd "$BUILD_DIR"
+    go mod tidy
     go build -o "$BINARY_PATH" .
 
     chmod +x "$BINARY_PATH"
