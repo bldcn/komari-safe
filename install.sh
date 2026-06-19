@@ -15,7 +15,7 @@ NC='\033[0m'
 log_info()  { echo -e "$1"; }
 log_success() { echo -e "${GREEN}$1${NC}"; }
 log_error() { echo -e "${RED}$1${NC}"; }
-log_step() { echo -e "${YELLOW}$1${NC}"; }
+log_step()  { echo -e "${YELLOW}$1${NC}"; }
 
 INSTALL_DIR="/opt/komari-safe"
 SERVICE_NAME="komari-safe"
@@ -23,6 +23,9 @@ BINARY_PATH="$INSTALL_DIR/komari"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
 REPO="https://github.com/bldcn/komari-safe"
+NON_INTERACTIVE=false
+
+[ ! -t 0 ] && NON_INTERACTIVE=true
 
 show_banner() {
     echo "=============================================================="
@@ -34,15 +37,10 @@ show_banner() {
 }
 
 check_root() {
-    if [ "$EUID" -ne 0 ]; then
-        log_error "请使用 root 权限运行此脚本"
-        exit 1
-    fi
+    [ "$EUID" -ne 0 ] && { log_error "请使用 root 权限运行"; exit 1; }
 }
 
-check_systemd() {
-    command -v systemctl >/dev/null 2>&1
-}
+check_systemd() { command -v systemctl >/dev/null 2>&1; }
 
 detect_arch() {
     case $(uname -m) in
@@ -50,54 +48,51 @@ detect_arch() {
         aarch64) echo "arm64" ;;
         i386|i686) echo "386" ;;
         riscv64) echo "riscv64" ;;
-        *) log_error "不支持的架构: $(uname -m)"; exit 1 ;;
+        *) log_error "不支持的架构"; exit 1 ;;
     esac
 }
 
-is_installed() {
-    [ -f "$BINARY_PATH" ]
+ask_port() {
+    if $NON_INTERACTIVE; then
+        LISTEN_PORT="$DEFAULT_PORT"
+        log_info "非交互模式，使用默认端口: $DEFAULT_PORT"
+        return
+    fi
+    while true; do
+        read -p "监听端口 [$DEFAULT_PORT]: " p
+        [ -z "$p" ] && { LISTEN_PORT="$DEFAULT_PORT"; break; }
+        [[ "$p" =~ ^[0-9]+$ ]] && ((p>=1 && p<=65535)) && { LISTEN_PORT="$p"; break; }
+        log_error "无效端口 (1-65535)"
+    done
 }
 
 install_deps() {
-    log_step "检查并安装依赖 (git, go, curl)..."
+    log_step "安装依赖 (git, go, curl)..."
     if command -v apt >/dev/null 2>&1; then
-        apt update && apt install -y git curl golang-go
+        apt update -qq && apt install -y git curl golang-go
     elif command -v yum >/dev/null 2>&1; then
         yum install -y git curl golang
     elif command -v apk >/dev/null 2>&1; then
         apk add git curl go
     else
-        log_error "未找到支持的包管理器 (apt/yum/apk)"
-        exit 1
+        log_error "未找到包管理器 (apt/yum/apk)"; exit 1
     fi
 }
 
 install_from_source() {
     log_step "从源码编译安装..."
-
-    while true; do
-        read -p "请输入监听端口 [默认: $DEFAULT_PORT]: " input_port
-        if [[ -z "$input_port" ]]; then
-            LISTEN_PORT="$DEFAULT_PORT"; break
-        elif [[ "$input_port" =~ ^[0-9]+$ ]] && (( input_port >= 1 && input_port <= 65535 )); then
-            LISTEN_PORT="$input_port"; break
-        else
-            log_error "端口号无效 (1-65535)"
-        fi
-    done
-
+    ask_port
     install_deps
 
     mkdir -p "$INSTALL_DIR"
 
-    # Clone and build
     BUILD_DIR=$(mktemp -d)
     trap "rm -rf $BUILD_DIR" EXIT
 
-    log_step "克隆仓库..."
+    log_step "克隆 $REPO ..."
     git clone --depth 1 "$REPO" "$BUILD_DIR"
 
-    log_step "编译 Komari Safe..."
+    log_step "编译中 (约 1-3 分钟)..."
     cd "$BUILD_DIR"
     go build -o "$BINARY_PATH" .
 
@@ -105,13 +100,11 @@ install_from_source() {
     log_success "编译完成: $BINARY_PATH"
 
     if ! check_systemd; then
-        log_step "未检测到 systemd，手动运行命令:"
-        echo "    $BINARY_PATH server -l 0.0.0.0:$LISTEN_PORT"
+        log_info "手动运行: $BINARY_PATH server -l 0.0.0.0:$LISTEN_PORT"
         return
     fi
 
-    create_service "$LISTEN_PORT"
-
+    create_service
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl start "$SERVICE_NAME"
@@ -120,59 +113,39 @@ install_from_source() {
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         log_success "服务启动成功"
         local pass=$(journalctl -u "$SERVICE_NAME" --since "1 min ago" 2>/dev/null | grep "admin account created" | tail -1 | sed 's/.*admin account created.//' || true)
-        show_access "$pass" "$LISTEN_PORT"
+        show_access "$pass"
     else
-        log_error "服务启动失败，请查看: journalctl -u $SERVICE_NAME -f"
+        log_error "启动失败: journalctl -u $SERVICE_NAME -f"
     fi
 }
 
 install_binary() {
-    log_step "从预编译二进制安装..."
-
-    while true; do
-        read -p "请输入监听端口 [默认: $DEFAULT_PORT]: " input_port
-        if [[ -z "$input_port" ]]; then
-            LISTEN_PORT="$DEFAULT_PORT"; break
-        elif [[ "$input_port" =~ ^[0-9]+$ ]] && (( input_port >= 1 && input_port <= 65535 )); then
-            LISTEN_PORT="$input_port"; break
-        else
-            log_error "端口号无效 (1-65535)"
-        fi
-    done
+    log_step "下载二进制安装..."
+    ask_port
 
     if ! command -v curl >/dev/null 2>&1; then
-        if command -v apt >/dev/null 2>&1; then apt update && apt install -y curl
-        elif command -v yum >/dev/null 2>&1; then yum install -y curl
-        elif command -v apk >/dev/null 2>&1; then apk add curl
-        fi
+        command -v apt >/dev/null 2>&1 && { apt update -qq; apt install -y curl; }
+        command -v yum >/dev/null 2>&1 && yum install -y curl
+        command -v apk >/dev/null 2>&1 && apk add curl
     fi
 
     local arch=$(detect_arch)
-    log_info "检测到架构: $arch"
-
+    log_info "架构: $arch"
     mkdir -p "$INSTALL_DIR"
 
-    local file_name="komari-safe-linux-${arch}"
-    local download_url="$REPO/releases/latest/download/${file_name}"
-
-    log_step "下载 Komari Safe..."
-    log_info "URL: $download_url"
-
-    if ! curl -fsSL -o "$BINARY_PATH" "$download_url"; then
-        log_error "下载失败。请确保已发布 Release，或使用源码安装模式。"
-        log_info "尝试源码安装: bash $0 source"
-        return 1
-    fi
+    local url="$REPO/releases/latest/download/komari-safe-linux-${arch}"
+    log_step "下载 $url"
+    curl -fsSL -o "$BINARY_PATH" "$url" || { log_error "下载失败，请用 source 模式: bash install.sh source"; exit 1; }
 
     chmod +x "$BINARY_PATH"
-    log_success "安装完成: $BINARY_PATH"
+    log_success "安装完成"
 
     if ! check_systemd; then
-        echo "手动运行: $BINARY_PATH server -l 0.0.0.0:$LISTEN_PORT"
+        log_info "手动运行: $BINARY_PATH server -l 0.0.0.0:$LISTEN_PORT"
         return
     fi
 
-    create_service "$LISTEN_PORT"
+    create_service
     systemctl daemon-reload
     systemctl enable "$SERVICE_NAME"
     systemctl start "$SERVICE_NAME"
@@ -181,14 +154,13 @@ install_binary() {
     if systemctl is-active --quiet "$SERVICE_NAME"; then
         log_success "服务启动成功"
         local pass=$(journalctl -u "$SERVICE_NAME" --since "1 min ago" 2>/dev/null | grep "admin account created" | tail -1 | sed 's/.*admin account created.//' || true)
-        show_access "$pass" "$LISTEN_PORT"
+        show_access "$pass"
     else
-        log_error "服务启动失败: journalctl -u $SERVICE_NAME -f"
+        log_error "启动失败: journalctl -u $SERVICE_NAME -f"
     fi
 }
 
 create_service() {
-    local port="$1"
     log_step "创建 systemd 服务..."
     cat > "/etc/systemd/system/${SERVICE_NAME}.service" << EOF
 [Unit]
@@ -197,7 +169,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${BINARY_PATH} server -l 0.0.0.0:${port}
+ExecStart=${BINARY_PATH} server -l 0.0.0.0:${LISTEN_PORT}
 WorkingDirectory=${INSTALL_DIR}
 Restart=always
 User=root
@@ -209,67 +181,37 @@ EOF
 }
 
 show_access() {
-    local pass="$1"; local port="${2:-$DEFAULT_PORT}"
+    local pass="$1"
     local ip=$(hostname -I 2>/dev/null | awk '{print $1}' || echo "YOUR_IP")
     echo
     log_success "=============================================="
-    log_success "  Komari Safe 安装完成！"
-    log_success "=============================================="
-    echo
-    log_info "  访问地址: http://${ip}:${port}"
+    log_success "  Komari Safe 安装完成!"
+    log_success "  地址: http://${ip}:${LISTEN_PORT}"
     if [ -n "$pass" ]; then
         log_info "  $pass"
     else
-        log_info "  账号密码: 查看日志 journalctl -u $SERVICE_NAME | grep 'admin account'"
+        log_info "  账号密码: journalctl -u $SERVICE_NAME | grep 'admin account'"
     fi
-    echo
-    log_info "  服务管理:"
-    log_info "    状态: systemctl status $SERVICE_NAME"
-    log_info "    重启: systemctl restart $SERVICE_NAME"
-    log_info "    停止: systemctl stop $SERVICE_NAME"
-    log_info "    日志: journalctl -u $SERVICE_NAME -f"
-    echo
+    log_success "=============================================="
 }
 
 uninstall() {
-    log_step "卸载 Komari Safe..."
-    if ! is_installed; then log_info "未安装"; return; fi
-    read -p "确认卸载? (y/N): " confirm
-    [[ ! $confirm =~ ^[Yy]$ ]] && return
-
-    if check_systemd; then
-        systemctl stop "$SERVICE_NAME" 2>/dev/null || true
-        systemctl disable "$SERVICE_NAME" 2>/dev/null || true
-        rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
-        systemctl daemon-reload
-    fi
+    check_root
+    if [ ! -f "$BINARY_PATH" ]; then log_info "未安装"; return; fi
+    read -p "确认卸载? (y/N): " c
+    [[ ! $c =~ ^[Yy]$ ]] && return
+    check_systemd && { systemctl stop "$SERVICE_NAME" 2>/dev/null; systemctl disable "$SERVICE_NAME" 2>/dev/null; rm -f "/etc/systemd/system/${SERVICE_NAME}.service"; systemctl daemon-reload; }
     rm -f "$BINARY_PATH"
     rmdir "$INSTALL_DIR" 2>/dev/null || true
-    log_success "卸载完成。数据目录保留在 $INSTALL_DIR"
+    log_success "卸载完成"
 }
 
-show_status() {
-    if ! is_installed; then log_error "未安装"; return; fi
-    if check_systemd; then systemctl status "$SERVICE_NAME" --no-pager -l; fi
-}
-
-show_logs() {
-    if ! is_installed; then log_error "未安装"; return; fi
-    if check_systemd; then journalctl -u "$SERVICE_NAME" -f --no-pager; fi
-}
-
-restart_service() {
-    if ! is_installed; then return; fi
-    if check_systemd; then systemctl restart "$SERVICE_NAME" && log_success "已重启"; fi
-}
-
-# ----- Main -----
+# ====== Main ======
 case "${1:-}" in
     source) check_root; show_banner; install_from_source ;;
-    uninstall) check_root; uninstall ;;
-    status) show_status ;;
-    logs) show_logs ;;
-    restart) check_root; restart_service ;;
     binary|"") check_root; show_banner; install_binary ;;
-    *) echo "用法: $0 [binary|source|uninstall|status|logs|restart]"; exit 1 ;;
+    uninstall) uninstall ;;
+    status) check_systemd && systemctl status "$SERVICE_NAME" --no-pager -l || log_error "未安装 systemd" ;;
+    logs)  check_systemd && journalctl -u "$SERVICE_NAME" -f --no-pager || log_error "未安装 systemd" ;;
+    *) echo "用法: $0 [source|binary|uninstall|status|logs]" ;;
 esac
