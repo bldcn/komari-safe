@@ -5,8 +5,6 @@
 # 仓库: https://github.com/bldcn/komari-safe
 #
 
-set -e
-
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[0;33m'
@@ -23,9 +21,13 @@ BINARY_PATH="$INSTALL_DIR/komari"
 DEFAULT_PORT="25774"
 LISTEN_PORT=""
 REPO="https://github.com/bldcn/komari-safe"
-NON_INTERACTIVE=false
 
-[ ! -t 0 ] && NON_INTERACTIVE=true
+is_non_interactive() {
+    # 安全检测：stdin 不是终端 或 显式传了 --yes
+    [ ! -t 0 ] && return 0
+    [ "$NONINTERACTIVE" = "1" ] && return 0
+    return 1
+}
 
 show_banner() {
     echo "=============================================================="
@@ -53,7 +55,7 @@ detect_arch() {
 }
 
 ask_port() {
-    if $NON_INTERACTIVE; then
+    if is_non_interactive; then
         LISTEN_PORT="$DEFAULT_PORT"
         log_info "非交互模式，使用默认端口: $DEFAULT_PORT"
         return
@@ -80,6 +82,7 @@ install_deps() {
 }
 
 install_from_source() {
+    set -e
     log_step "从源码编译安装..."
     ask_port
     install_deps
